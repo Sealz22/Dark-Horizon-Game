@@ -1,0 +1,1158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dark Horizon</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #0a0a0a;
+            color: #fff;
+            font-family: 'Courier New', monospace;
+            overflow: hidden;
+        }
+
+        #gameContainer {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        #gameCanvas {
+            border: 2px solid #333;
+            background: #111;
+            box-shadow: 0 0 20px rgba(0, 100, 255, 0.3);
+        }
+
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 100;
+        }
+
+        #timer {
+            font-size: 24px;
+            color: #ff4444;
+            text-shadow: 0 0 10px #ff4444;
+        }
+
+        #phase {
+            font-size: 18px;
+            color: #44ff44;
+            margin-top: 10px;
+        }
+
+        #stats {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            text-align: right;
+            z-index: 100;
+        }
+
+        #instructions {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            text-align: center;
+            font-size: 14px;
+            color: #888;
+            z-index: 100;
+        }
+
+        .game-over {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.9);
+            padding: 40px;
+            border: 2px solid #ff4444;
+            text-align: center;
+            z-index: 200;
+        }
+
+        .game-over button {
+            margin-top: 20px;
+            padding: 10px 20px;
+            background: #333;
+            color: #fff;
+            border: 1px solid #666;
+            cursor: pointer;
+            font-family: 'Courier New', monospace;
+        }
+
+        .game-over button:hover {
+            background: #555;
+        }
+    </style>
+</head>
+<body>
+    <div id="gameContainer">
+        <canvas id="gameCanvas" width="1000" height="700"></canvas>
+        
+        <div id="ui">
+            <div id="timer">30</div>
+            <div id="phase">PREP PHASE</div>
+        </div>
+        
+        <div id="stats">
+            <div>Round: <span id="round">1</span></div>
+            <div>Score: <span id="score">0</span></div>
+            <div>Battery: <span id="battery">100%</span></div>
+        </div>
+        
+        <div id="instructions">
+            WASD: Move | SHIFT: Sprint | E: Interact | F: Flashlight | SPACE: Hide
+        </div>
+    </div>
+
+    <script>
+        // Game Configuration
+        const CONFIG = {
+            CANVAS_WIDTH: 1000,
+            CANVAS_HEIGHT: 700,
+            PLAYER_SPEED: 72,
+            PLAYER_SPRINT_SPEED: 104,
+            ALIEN_PATROL_SPEED: 64,
+            ALIEN_HUNT_SPEED: 120,
+            ALIEN_FOV: 85,
+            ALIEN_HUNT_FOV: 110,
+            PREP_TIME: 30,
+            SURVIVAL_TIME_BASE: 60,
+            GRID_SIZE: 24,
+            SOUND_RANGES: {
+                walk: 60,
+                sprint: 200,
+                door: 240,
+                vent: 320
+            }
+        };
+
+        // Get canvas and context
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Input handling
+        const keys = {};
+        let mousePos = { x: 0, y: 0 };
+
+        document.addEventListener('keydown', (e) => {
+            keys[e.key.toLowerCase()] = true;
+            keys[e.code.toLowerCase()] = true;
+        });
+        document.addEventListener('keyup', (e) => {
+            keys[e.key.toLowerCase()] = false;
+            keys[e.code.toLowerCase()] = false;
+        });
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            mousePos.x = e.clientX - rect.left;
+            mousePos.y = e.clientY - rect.top;
+        });
+
+        // Game State
+        let gameState = {
+            phase: 'prep',
+            timer: CONFIG.PREP_TIME,
+            round: 1,
+            score: 0,
+            survivalTime: CONFIG.SURVIVAL_TIME_BASE,
+            playerData: {
+                hidingSpots: {},
+                movementHeatmap: new Array(CONFIG.GRID_SIZE).fill().map(() => new Array(CONFIG.GRID_SIZE).fill(0))
+            }
+        };
+
+        // Mini-game system
+        let miniGame = {
+            active: false,
+            type: 'none',
+            timer: 0,
+            nextGameTimer: 0,
+            data: {},
+            result: 'none'
+        };
+
+        // Hiding spots
+        const hidingSpots = [
+            { x: 200, y: 200, type: 'locker', occupied: false, concealment: 100 },
+            { x: 300, y: 200, type: 'locker', occupied: false, concealment: 100 },
+            { x: 600, y: 400, type: 'locker', occupied: false, concealment: 100 },
+            { x: 800, y: 200, type: 'locker', occupied: false, concealment: 100 },
+            { x: 150, y: 400, type: 'crate', occupied: false, concealment: 70 },
+            { x: 450, y: 350, type: 'crate', occupied: false, concealment: 70 },
+            { x: 750, y: 450, type: 'crate', occupied: false, concealment: 70 },
+            { x: 350, y: 550, type: 'crate', occupied: false, concealment: 70 },
+            { x: 100, y: 300, type: 'vent', occupied: false, concealment: 95 },
+            { x: 500, y: 150, type: 'vent', occupied: false, concealment: 95 },
+            { x: 850, y: 350, type: 'vent', occupied: false, concealment: 95 }
+        ];
+
+        // Player object
+        const player = {
+            x: 500,
+            y: 350,
+            radius: 8,
+            speed: CONFIG.PLAYER_SPEED,
+            flashlight: true,
+            battery: 100,
+            stamina: 100,
+            hidden: false,
+            hidingSpot: null,
+            lastSoundTime: 0,
+            
+            update: function(deltaTime) {
+                if (this.hidden) return;
+
+                let dx = 0, dy = 0;
+                
+                if (keys['w'] || keys['keyw'] || keys['arrowup']) dy = -1;
+                if (keys['s'] || keys['keys'] || keys['arrowdown']) dy = 1;
+                if (keys['a'] || keys['keya'] || keys['arrowleft']) dx = -1;
+                if (keys['d'] || keys['keyd'] || keys['arrowright']) dx = 1;
+                
+                if (dx !== 0 || dy !== 0) {
+                    const length = Math.sqrt(dx * dx + dy * dy);
+                    dx /= length;
+                    dy /= length;
+                    
+                    let currentSpeed = this.speed;
+                    let soundType = 'walk';
+                    
+                    if ((keys['shift'] || keys['shiftleft'] || keys['shiftright']) && this.stamina > 0) {
+                        currentSpeed = CONFIG.PLAYER_SPRINT_SPEED;
+                        this.stamina = Math.max(0, this.stamina - deltaTime * 30);
+                        soundType = 'sprint';
+                    } else {
+                        this.stamina = Math.min(100, this.stamina + deltaTime * 20);
+                    }
+                    
+                    this.x += dx * currentSpeed * deltaTime;
+                    this.y += dy * currentSpeed * deltaTime;
+                    
+                    this.x = Math.max(this.radius, Math.min(CONFIG.CANVAS_WIDTH - this.radius, this.x));
+                    this.y = Math.max(this.radius, Math.min(CONFIG.CANVAS_HEIGHT - this.radius, this.y));
+                    
+                    const gridX = Math.floor(this.x / (CONFIG.CANVAS_WIDTH / CONFIG.GRID_SIZE));
+                    const gridY = Math.floor(this.y / (CONFIG.CANVAS_HEIGHT / CONFIG.GRID_SIZE));
+                    if (gridX >= 0 && gridX < CONFIG.GRID_SIZE && gridY >= 0 && gridY < CONFIG.GRID_SIZE) {
+                        gameState.playerData.movementHeatmap[gridY][gridX] += deltaTime;
+                    }
+                    
+                    if (Date.now() - this.lastSoundTime > 200) {
+                        alien.hearSound(this.x, this.y, soundType);
+                        this.lastSoundTime = Date.now();
+                    }
+                }
+                
+                if (keys['f'] || keys['keyf']) {
+                    this.flashlight = !this.flashlight;
+                    keys['f'] = false;
+                    keys['keyf'] = false;
+                }
+                
+                if (this.flashlight) {
+                    this.battery = Math.max(0, this.battery - deltaTime * 2);
+                }
+                
+                if (keys[' '] || keys['e'] || keys['keye'] || keys['space']) {
+                    this.tryHide();
+                    keys[' '] = false;
+                    keys['e'] = false;
+                    keys['keye'] = false;
+                    keys['space'] = false;
+                }
+            },
+            
+            tryHide: function() {
+                if (this.hidden) {
+                    this.hidden = false;
+                    if (this.hidingSpot) {
+                        this.hidingSpot.occupied = false;
+                        this.hidingSpot = null;
+                    }
+                    miniGame.active = false;
+                    miniGame.type = 'none';
+                    return;
+                }
+                
+                const nearbySpot = hidingSpots.find(spot => {
+                    const dist = Math.sqrt((this.x - spot.x) ** 2 + (this.y - spot.y) ** 2);
+                    return dist < 40;
+                });
+                
+                if (nearbySpot && !nearbySpot.occupied) {
+                    this.hidden = true;
+                    this.hidingSpot = nearbySpot;
+                    nearbySpot.occupied = true;
+                    
+                    const spotKey = `${nearbySpot.type}-${Math.floor(nearbySpot.x/50)}-${Math.floor(nearbySpot.y/50)}`;
+                    gameState.playerData.hidingSpots[spotKey] = (gameState.playerData.hidingSpots[spotKey] || 0) + 1;
+                    
+                    if (nearbySpot.type === 'vent') {
+                        alien.hearSound(this.x, this.y, 'vent');
+                    }
+                    
+                    miniGame.nextGameTimer = Math.random() * 10 + 5;
+                }
+            },
+            
+            draw: function() {
+                if (this.hidden) return;
+                
+                ctx.fillStyle = '#44ff44';
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fill();
+                
+                if (this.flashlight && this.battery > 0) {
+                    const angle = Math.atan2(mousePos.y - this.y, mousePos.x - this.x);
+                    const coneAngle = Math.PI / 6;
+                    const range = 150;
+                    
+                    ctx.fillStyle = `rgba(255, 255, 200, ${this.battery / 200})`;
+                    ctx.beginPath();
+                    ctx.moveTo(this.x, this.y);
+                    ctx.arc(this.x, this.y, range, angle - coneAngle/2, angle + coneAngle/2);
+                    ctx.closePath();
+                    ctx.fill();
+                }
+            }
+        };
+
+        // Alien AI
+        const alien = {
+            x: 100,
+            y: 100,
+            radius: 12,
+            speed: CONFIG.ALIEN_PATROL_SPEED,
+            state: 'dormant',
+            target: { x: 100, y: 100 },
+            fov: CONFIG.ALIEN_FOV,
+            direction: 0,
+            suspicion: 0,
+            soundQueue: [],
+            lastKnownPlayerPos: null,
+            searchTargets: [],
+            patrolRoute: [],
+            routeIndex: 0,
+            stateTimer: 0,
+            currentCheckSpot: null,
+            checkingTimer: 0,
+            
+            init: function() {
+                this.patrolRoute = [
+                    { x: 150, y: 150 }, { x: 400, y: 150 }, { x: 400, y: 300 },
+                    { x: 700, y: 300 }, { x: 700, y: 500 }, { x: 400, y: 500 }, { x: 150, y: 500 }
+                ];
+                this.target = this.patrolRoute[0];
+            },
+            
+            update: function(deltaTime) {
+                this.stateTimer += deltaTime;
+                
+                switch (this.state) {
+                    case 'dormant':
+                        if (gameState.phase === 'hunt') {
+                            this.state = 'patrol';
+                            this.speed = CONFIG.ALIEN_PATROL_SPEED;
+                        }
+                        break;
+                    case 'patrol':
+                        this.patrol(deltaTime);
+                        break;
+                    case 'investigate':
+                        this.investigate(deltaTime);
+                        break;
+                    case 'search':
+                        this.search(deltaTime);
+                        break;
+                    case 'hunt':
+                        this.hunt(deltaTime);
+                        break;
+                }
+                
+                this.processMovement(deltaTime);
+                this.processSounds();
+                this.checkPlayerVisibility();
+            },
+            
+            patrol: function(deltaTime) {
+                const dist = Math.sqrt((this.target.x - this.x) ** 2 + (this.target.y - this.y) ** 2);
+                
+                if (dist < 20) {
+                    this.routeIndex = (this.routeIndex + 1) % this.patrolRoute.length;
+                    this.target = this.patrolRoute[this.routeIndex];
+                    
+                    if (Math.random() < 0.3) {
+                        this.target = this.getHeatmapBiasedTarget();
+                    }
+                }
+                
+                this.fov = CONFIG.ALIEN_FOV;
+                this.speed = CONFIG.ALIEN_PATROL_SPEED;
+            },
+            
+            investigate: function(deltaTime) {
+                const dist = Math.sqrt((this.target.x - this.x) ** 2 + (this.target.y - this.y) ** 2);
+                
+                if (dist < 30) {
+                    this.suspicion += deltaTime * 10;
+                    
+                    if (this.suspicion > 50 || this.stateTimer > 8) {
+                        this.state = 'search';
+                        this.generateSearchTargets();
+                        this.stateTimer = 0;
+                    }
+                } else if (this.stateTimer > 15) {
+                    this.state = 'patrol';
+                    this.suspicion = Math.max(0, this.suspicion - 20);
+                    this.stateTimer = 0;
+                }
+            },
+            
+            search: function(deltaTime) {
+                if (this.searchTargets.length === 0) {
+                    this.state = 'patrol';
+                    this.stateTimer = 0;
+                    this.currentCheckSpot = null;
+                    return;
+                }
+                
+                const currentTarget = this.searchTargets[0];
+                const dist = Math.sqrt((currentTarget.x - this.x) ** 2 + (currentTarget.y - this.y) ** 2);
+                
+                if (dist < 25) {
+                    if (!this.currentCheckSpot) {
+                        this.currentCheckSpot = hidingSpots.find(spot => 
+                            Math.sqrt((spot.x - currentTarget.x) ** 2 + (spot.y - currentTarget.y) ** 2) < 30
+                        );
+                        this.checkingTimer = 0;
+                    }
+                    
+                    if (this.currentCheckSpot) {
+                        this.checkingTimer += deltaTime;
+                        
+                        let checkTime = 1.0;
+                        if (this.currentCheckSpot.type === 'locker') checkTime = 2.0;
+                        else if (this.currentCheckSpot.type === 'crate') checkTime = 1.0;
+                        else if (this.currentCheckSpot.type === 'vent') checkTime = 1.5;
+                        
+                        if (this.checkingTimer >= checkTime) {
+                            if (this.currentCheckSpot.occupied && player.hidingSpot === this.currentCheckSpot) {
+                                this.state = 'hunt';
+                                this.lastKnownPlayerPos = { x: this.currentCheckSpot.x, y: this.currentCheckSpot.y };
+                                player.hidden = false;
+                                player.hidingSpot.occupied = false;
+                                player.hidingSpot = null;
+                                this.stateTimer = 0;
+                                this.currentCheckSpot = null;
+                                return;
+                            }
+                            
+                            this.searchTargets.shift();
+                            this.currentCheckSpot = null;
+                            if (this.searchTargets.length > 0) {
+                                this.target = this.searchTargets[0];
+                            }
+                        }
+                    } else {
+                        this.searchTargets.shift();
+                        if (this.searchTargets.length > 0) {
+                            this.target = this.searchTargets[0];
+                        }
+                    }
+                }
+            },
+            
+            hunt: function(deltaTime) {
+                if (this.lastKnownPlayerPos) {
+                    this.target = this.lastKnownPlayerPos;
+                    const dist = Math.sqrt((this.target.x - this.x) ** 2 + (this.target.y - this.y) ** 2);
+                    
+                    if (dist < 50) {
+                        this.lastKnownPlayerPos = null;
+                        this.state = 'search';
+                        this.generateSearchTargets();
+                        this.stateTimer = 0;
+                    }
+                }
+                
+                this.fov = CONFIG.ALIEN_HUNT_FOV;
+                this.speed = CONFIG.ALIEN_HUNT_SPEED;
+                
+                if (!player.hidden) {
+                    const playerDist = Math.sqrt((player.x - this.x) ** 2 + (player.y - this.y) ** 2);
+                    if (playerDist < 25) {
+                        gameState.phase = 'gameOver';
+                    }
+                }
+            },
+            
+            processMovement: function(deltaTime) {
+                const dx = this.target.x - this.x;
+                const dy = this.target.y - this.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                
+                if (dist > 5) {
+                    const moveX = (dx / dist) * this.speed * deltaTime;
+                    const moveY = (dy / dist) * this.speed * deltaTime;
+                    
+                    this.x += moveX;
+                    this.y += moveY;
+                    this.direction = Math.atan2(dy, dx);
+                }
+            },
+            
+            processSounds: function() {
+                if (this.soundQueue.length > 0) {
+                    const sound = this.soundQueue.shift();
+                    this.target = { x: sound.x, y: sound.y };
+                    
+                    if (sound.type === 'sprint' || sound.type === 'vent') {
+                        this.state = 'hunt';
+                        this.lastKnownPlayerPos = { x: sound.x, y: sound.y };
+                        this.stateTimer = 0;
+                    } else {
+                        this.state = 'investigate';
+                        this.stateTimer = 0;
+                    }
+                }
+            },
+            
+            checkPlayerVisibility: function() {
+                if (player.hidden || gameState.phase === 'prep') return;
+                
+                const dx = player.x - this.x;
+                const dy = player.y - this.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                const angleToPlayer = Math.atan2(dy, dx);
+                const angleDiff = Math.abs(angleToPlayer - this.direction);
+                
+                let visibilityRange = 150;
+                if (player.flashlight && player.battery > 0) {
+                    visibilityRange *= 1.5;
+                }
+                
+                if (dist < visibilityRange && angleDiff < (this.fov * Math.PI / 180) / 2) {
+                    this.state = 'hunt';
+                    this.lastKnownPlayerPos = { x: player.x, y: player.y };
+                    this.target = this.lastKnownPlayerPos;
+                    this.stateTimer = 0;
+                }
+            },
+            
+            hearSound: function(x, y, type) {
+                if (gameState.phase === 'prep') return;
+                const dist = Math.sqrt((x - this.x) ** 2 + (y - this.y) ** 2);
+                if (dist <= CONFIG.SOUND_RANGES[type]) {
+                    this.soundQueue.push({ x, y, type, time: Date.now() });
+                }
+            },
+            
+            generateSearchTargets: function() {
+                this.searchTargets = [];
+                
+                const sortedSpots = [...hidingSpots].sort((a, b) => {
+                    const aKey = `${a.type}-${Math.floor(a.x/50)}-${Math.floor(a.y/50)}`;
+                    const bKey = `${b.type}-${Math.floor(b.x/50)}-${Math.floor(b.y/50)}`;
+                    const aUsage = gameState.playerData.hidingSpots[aKey] || 0;
+                    const bUsage = gameState.playerData.hidingSpots[bKey] || 0;
+                    return bUsage - aUsage;
+                });
+                
+                this.searchTargets = sortedSpots.slice(0, 5).map(spot => ({ x: spot.x, y: spot.y }));
+                if (this.searchTargets.length > 0) {
+                    this.target = this.searchTargets[0];
+                }
+            },
+            
+            getHeatmapBiasedTarget: function() {
+                let maxHeat = 0;
+                let hotspots = [];
+                
+                for (let y = 0; y < CONFIG.GRID_SIZE; y++) {
+                    for (let x = 0; x < CONFIG.GRID_SIZE; x++) {
+                        const heat = gameState.playerData.movementHeatmap[y][x];
+                        if (heat > maxHeat) {
+                            maxHeat = heat;
+                            hotspots = [{ x, y }];
+                        } else if (heat === maxHeat && heat > 0) {
+                            hotspots.push({ x, y });
+                        }
+                    }
+                }
+                
+                if (hotspots.length > 0) {
+                    const hotspot = hotspots[Math.floor(Math.random() * hotspots.length)];
+                    return {
+                        x: (hotspot.x + 0.5) * (CONFIG.CANVAS_WIDTH / CONFIG.GRID_SIZE),
+                        y: (hotspot.y + 0.5) * (CONFIG.CANVAS_HEIGHT / CONFIG.GRID_SIZE)
+                    };
+                }
+                
+                return this.patrolRoute[this.routeIndex];
+            },
+            
+            draw: function() {
+                ctx.fillStyle = this.state === 'hunt' ? '#ff4444' : '#ff8844';
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fill();
+                
+                if (this.currentCheckSpot && this.checkingTimer > 0) {
+                    const progress = Math.min(this.checkingTimer / 2.0, 1.0);
+                    ctx.strokeStyle = '#ffff44';
+                    ctx.lineWidth = 3;
+                    ctx.beginPath();
+                    ctx.arc(this.currentCheckSpot.x, this.currentCheckSpot.y, 25, 0, Math.PI * 2 * progress);
+                    ctx.stroke();
+                    
+                    ctx.fillStyle = `rgba(255, 255, 68, ${0.3 * Math.sin(this.checkingTimer * 8)})`;
+                    ctx.beginPath();
+                    ctx.arc(this.currentCheckSpot.x, this.currentCheckSpot.y, 20, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(this.x, this.y);
+                ctx.lineTo(
+                    this.x + Math.cos(this.direction) * 20,
+                    this.y + Math.sin(this.direction) * 20
+                );
+                ctx.stroke();
+                
+                if (this.state !== 'dormant') {
+                    ctx.strokeStyle = `rgba(255, 100, 100, ${this.state === 'hunt' ? 0.3 : 0.1})`;
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    const fovRad = (this.fov * Math.PI / 180) / 2;
+                    ctx.moveTo(this.x, this.y);
+                    ctx.arc(this.x, this.y, 100, this.direction - fovRad, this.direction + fovRad);
+                    ctx.closePath();
+                    ctx.stroke();
+                }
+                
+                ctx.fillStyle = '#fff';
+                ctx.font = '12px Courier New';
+                ctx.textAlign = 'center';
+                ctx.fillText(this.state.toUpperCase(), this.x, this.y - 25);
+                ctx.textAlign = 'left';
+            }
+        };
+
+        // Mini-game functions
+        function updateMiniGame(deltaTime) {
+            if (!player.hidden || gameState.phase !== 'hunt') {
+                miniGame.active = false;
+                return;
+            }
+            
+            if (!miniGame.active) {
+                miniGame.nextGameTimer -= deltaTime;
+                if (miniGame.nextGameTimer <= 0) {
+                    startRandomMiniGame();
+                }
+                return;
+            }
+            
+            miniGame.timer -= deltaTime;
+            
+            switch (miniGame.type) {
+                case 'breathe':
+                    updateBreatheGame(deltaTime);
+                    break;
+                case 'heartbeat':
+                    updateHeartbeatGame(deltaTime);
+                    break;
+                case 'sequence':
+                    updateSequenceGame(deltaTime);
+                    break;
+            }
+            
+            if (miniGame.timer <= 0) {
+                failMiniGame();
+            }
+        }
+        
+        function startRandomMiniGame() {
+            const games = ['breathe', 'heartbeat', 'sequence'];
+            miniGame.type = games[Math.floor(Math.random() * games.length)];
+            miniGame.active = true;
+            miniGame.result = 'none';
+            
+            switch (miniGame.type) {
+                case 'breathe':
+                    miniGame.timer = 4.0;
+                    miniGame.data = { 
+                        phase: 'inhale', 
+                        progress: 0,
+                        completed: false,
+                        spacePressed: false
+                    };
+                    break;
+                case 'heartbeat':
+                    miniGame.timer = 5.0;
+                    miniGame.data = { 
+                        beats: 3 + Math.floor(Math.random() * 3),
+                        currentBeat: 0,
+                        beatTimer: 0,
+                        beatInterval: 0.8,
+                        window: false
+                    };
+                    break;
+                case 'sequence':
+                    const sequence = [];
+                    for (let i = 0; i < 4; i++) {
+                        sequence.push(['w', 'a', 's', 'd'][Math.floor(Math.random() * 4)]);
+                    }
+                    miniGame.timer = 6.0;
+                    miniGame.data = {
+                        sequence: sequence,
+                        input: [],
+                        showingSequence: true,
+                        showTimer: 2.0
+                    };
+                    break;
+            }
+        }
+        
+        function updateBreatheGame(deltaTime) {
+            const data = miniGame.data;
+            if (data.completed) return;
+            
+            if (keys[' '] || keys['space']) {
+                if (!data.spacePressed) {
+                    data.spacePressed = true;
+                    if (data.phase === 'hold' && data.progress > 0.8) {
+                        succeedMiniGame();
+                        return;
+                    }
+                }
+            } else {
+                data.spacePressed = false;
+            }
+            
+            data.progress += deltaTime / 1.5;
+            
+            if (data.progress >= 1.0) {
+                data.progress = 0;
+                if (data.phase === 'inhale') data.phase = 'hold';
+                else if (data.phase === 'hold') data.phase = 'exhale';
+                else data.phase = 'inhale';
+            }
+        }
+        
+        function updateHeartbeatGame(deltaTime) {
+            const data = miniGame.data;
+            data.beatTimer += deltaTime;
+            
+            if (data.beatTimer >= data.beatInterval) {
+                data.currentBeat++;
+                data.beatTimer = 0;
+                data.window = true;
+                
+                setTimeout(() => {
+                    data.window = false;
+                }, 300);
+            }
+            
+            if (data.window && (keys[' '] || keys['space'])) {
+                data.currentBeat++;
+                data.window = false;
+                
+                if (data.currentBeat >= data.beats) {
+                    succeedMiniGame();
+                }
+            }
+            
+            if (data.currentBeat >= data.beats + 1) {
+                failMiniGame();
+            }
+        }
+        
+        function updateSequenceGame(deltaTime) {
+            const data = miniGame.data;
+            
+            if (data.showingSequence) {
+                data.showTimer -= deltaTime;
+                if (data.showTimer <= 0) {
+                    data.showingSequence = false;
+                }
+                return;
+            }
+            
+            ['w', 'a', 's', 'd'].forEach(key => {
+                if (keys[key] || keys['key' + key]) {
+                    if (data.input.length < data.sequence.length) {
+                        data.input.push(key);
+                        keys[key] = false;
+                        keys['key' + key] = false;
+                        
+                        if (data.input[data.input.length - 1] !== data.sequence[data.input.length - 1]) {
+                            failMiniGame();
+                            return;
+                        }
+                        
+                        if (data.input.length === data.sequence.length) {
+                            succeedMiniGame();
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+        
+        function succeedMiniGame() {
+            miniGame.active = false;
+            miniGame.result = 'success';
+            miniGame.nextGameTimer = Math.random() * 15 + 10;
+            gameState.score += 50;
+        }
+        
+        function failMiniGame() {
+            miniGame.active = false;
+            miniGame.result = 'failed';
+            miniGame.nextGameTimer = Math.random() * 20 + 15;
+            
+            if (player.hidingSpot) {
+                alien.hearSound(player.hidingSpot.x, player.hidingSpot.y, 'sprint');
+            }
+        }
+
+        function drawMiniGame() {
+            if (!miniGame.active) return;
+            
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+            
+            const boxX = CONFIG.CANVAS_WIDTH / 2 - 200;
+            const boxY = CONFIG.CANVAS_HEIGHT / 2 - 150;
+            const boxW = 400;
+            const boxH = 300;
+            
+            ctx.fillStyle = '#222';
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 2;
+            ctx.fillRect(boxX, boxY, boxW, boxH);
+            ctx.strokeRect(boxX, boxY, boxW, boxH);
+            
+            ctx.fillStyle = '#fff';
+            ctx.font = '18px Courier New';
+            ctx.textAlign = 'center';
+            
+            switch (miniGame.type) {
+                case 'breathe':
+                    drawBreatheGame(boxX + boxW/2, boxY + 50);
+                    break;
+                case 'heartbeat':
+                    drawHeartbeatGame(boxX + boxW/2, boxY + 50);
+                    break;
+                case 'sequence':
+                    drawSequenceGame(boxX + boxW/2, boxY + 50);
+                    break;
+            }
+            
+            ctx.fillStyle = miniGame.timer < 2 ? '#ff4444' : '#44ff44';
+            ctx.font = '24px Courier New';
+            ctx.fillText(`${Math.ceil(miniGame.timer)}`, boxX + boxW/2, boxY + boxH - 30);
+        }
+        
+        function drawBreatheGame(centerX, centerY) {
+            const data = miniGame.data;
+            
+            ctx.fillStyle = '#fff';
+            ctx.fillText('CONTROL YOUR BREATHING', centerX, centerY);
+            ctx.fillText('Hold SPACE when the circle is full', centerX, centerY + 30);
+            
+            const radius = 50 + (data.progress * 30);
+            let color = '#4444ff';
+            if (data.phase === 'hold') color = '#ff4444';
+            else if (data.phase === 'exhale') color = '#44ff44';
+            
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.arc(centerX, centerY + 100, radius, 0, Math.PI * 2);
+            ctx.stroke();
+            
+            ctx.fillStyle = color;
+            ctx.fillText(data.phase.toUpperCase(), centerX, centerY + 105);
+        }
+        
+        function drawHeartbeatGame(centerX, centerY) {
+            const data = miniGame.data;
+            
+            ctx.fillStyle = '#fff';
+            ctx.fillText('CONTROL YOUR HEARTBEAT', centerX, centerY);
+            ctx.fillText('Press SPACE on each beat', centerX, centerY + 30);
+            
+            for (let i = 0; i < data.beats; i++) {
+                const x = centerX - 100 + (i * 50);
+                const y = centerY + 100;
+                
+                if (i < data.currentBeat) {
+                    ctx.fillStyle = '#44ff44';
+                } else if (i === data.currentBeat && data.window) {
+                    ctx.fillStyle = '#ff4444';
+                } else {
+                    ctx.fillStyle = '#666';
+                }
+                
+                ctx.beginPath();
+                ctx.arc(x, y, 15, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            
+            ctx.fillStyle = '#fff';
+            ctx.fillText(`${data.currentBeat} / ${data.beats}`, centerX, centerY + 150);
+        }
+        
+        function drawSequenceGame(centerX, centerY) {
+            const data = miniGame.data;
+            
+            ctx.fillStyle = '#fff';
+            ctx.fillText('MEMORIZE THE SEQUENCE', centerX, centerY);
+            
+            if (data.showingSequence) {
+                ctx.fillText('Remember this pattern:', centerX, centerY + 30);
+                
+                for (let i = 0; i < data.sequence.length; i++) {
+                    const x = centerX - 75 + (i * 50);
+                    const y = centerY + 100;
+                    
+                    ctx.fillStyle = '#44ff44';
+                    ctx.font = '24px Courier New';
+                    ctx.fillText(data.sequence[i].toUpperCase(), x, y);
+                }
+            } else {
+                ctx.fillText('Enter the sequence with WASD:', centerX, centerY + 30);
+                
+                for (let i = 0; i < data.sequence.length; i++) {
+                    const x = centerX - 75 + (i * 50);
+                    const y = centerY + 100;
+                    
+                    if (i < data.input.length) {
+                        ctx.fillStyle = '#44ff44';
+                        ctx.font = '24px Courier New';
+                        ctx.fillText(data.input[i].toUpperCase(), x, y);
+                    } else {
+                        ctx.strokeStyle = '#666';
+                        ctx.lineWidth = 2;
+                        ctx.strokeRect(x - 15, y - 20, 30, 30);
+                    }
+                }
+            }
+            ctx.font = '18px Courier New';
+        }
+
+        // Game functions
+        function updateGame(deltaTime) {
+            if (gameState.phase === 'prep') {
+                gameState.timer -= deltaTime;
+                if (gameState.timer <= 0) {
+                    gameState.phase = 'hunt';
+                    gameState.timer = gameState.survivalTime;
+                    alien.state = 'patrol';
+                }
+            } else if (gameState.phase === 'hunt') {
+                gameState.timer -= deltaTime;
+                if (gameState.timer <= 0) {
+                    gameState.score += 100 * gameState.round;
+                    gameState.round++;
+                    gameState.timer = CONFIG.PREP_TIME;
+                    gameState.phase = 'prep';
+                    gameState.survivalTime = CONFIG.SURVIVAL_TIME_BASE + (gameState.round * 10);
+                    
+                    for (let y = 0; y < CONFIG.GRID_SIZE; y++) {
+                        for (let x = 0; x < CONFIG.GRID_SIZE; x++) {
+                            gameState.playerData.movementHeatmap[y][x] *= 0.7;
+                        }
+                    }
+                    
+                    player.x = 500;
+                    player.y = 350;
+                    player.hidden = false;
+                    if (player.hidingSpot) {
+                        player.hidingSpot.occupied = false;
+                        player.hidingSpot = null;
+                    }
+                    
+                    alien.x = 100;
+                    alien.y = 100;
+                    alien.state = 'dormant';
+                    alien.suspicion = 0;
+                    alien.soundQueue = [];
+                    alien.searchTargets = [];
+                    alien.currentCheckSpot = null;
+                    alien.checkingTimer = 0;
+                }
+                
+                alien.update(deltaTime);
+            }
+            
+            player.update(deltaTime);
+            updateMiniGame(deltaTime);
+        }
+
+        function drawRooms() {
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 2;
+            
+            ctx.strokeRect(50, 50, 300, 200);
+            ctx.fillStyle = '#222';
+            ctx.font = '16px Courier New';
+            ctx.textAlign = 'left';
+            ctx.fillText('BRIDGE', 60, 70);
+            
+            ctx.strokeRect(400, 50, 250, 200);
+            ctx.fillText('ENGINE', 410, 70);
+            
+            ctx.strokeRect(50, 300, 400, 250);
+            ctx.fillText('CARGO BAY', 60, 320);
+            
+            ctx.strokeRect(500, 300, 300, 250);
+            ctx.fillText('CREW QUARTERS', 510, 320);
+            
+            ctx.strokeRect(700, 50, 200, 200);
+            ctx.fillText('MED BAY', 710, 70);
+        }
+
+        function drawGame() {
+            ctx.fillStyle = '#111';
+            ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+            
+            drawRooms();
+            
+            hidingSpots.forEach(spot => {
+                let color = '#666';
+                if (spot.type === 'locker') color = '#888';
+                else if (spot.type === 'crate') color = '#654321';
+                else if (spot.type === 'vent') color = '#444';
+                
+                if (spot.occupied) color = '#ff4444';
+                
+                ctx.fillStyle = color;
+                if (spot.type === 'locker') {
+                    ctx.fillRect(spot.x - 15, spot.y - 20, 30, 40);
+                } else if (spot.type === 'crate') {
+                    ctx.fillRect(spot.x - 12, spot.y - 12, 24, 24);
+                } else if (spot.type === 'vent') {
+                    ctx.beginPath();
+                    ctx.arc(spot.x, spot.y, 10, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            });
+            
+            alien.draw();
+            player.draw();
+            drawMiniGame();
+            
+            updateUI();
+        }
+
+        function updateUI() {
+            document.getElementById('timer').textContent = Math.ceil(gameState.timer);
+            document.getElementById('phase').textContent = gameState.phase.toUpperCase() + ' PHASE';
+            document.getElementById('round').textContent = gameState.round;
+            document.getElementById('score').textContent = gameState.score;
+            document.getElementById('battery').textContent = Math.floor(player.battery) + '%';
+            
+            if (gameState.phase === 'gameOver') {
+                showGameOver();
+            }
+        }
+
+        function showGameOver() {
+            const gameOverDiv = document.createElement('div');
+            gameOverDiv.className = 'game-over';
+            gameOverDiv.innerHTML = `
+                <h2>GAME OVER</h2>
+                <p>Round: ${gameState.round}</p>
+                <p>Final Score: ${gameState.score}</p>
+                <p>The alien learned from your patterns...</p>
+                <button onclick="restartGame()">TRY AGAIN</button>
+            `;
+            document.getElementById('gameContainer').appendChild(gameOverDiv);
+        }
+
+        function restartGame() {
+            gameState = {
+                phase: 'prep',
+                timer: CONFIG.PREP_TIME,
+                round: 1,
+                score: 0,
+                survivalTime: CONFIG.SURVIVAL_TIME_BASE,
+                playerData: {
+                    hidingSpots: {},
+                    movementHeatmap: new Array(CONFIG.GRID_SIZE).fill().map(() => new Array(CONFIG.GRID_SIZE).fill(0))
+                }
+            };
+            
+            player.x = 500;
+            player.y = 350;
+            player.hidden = false;
+            player.battery = 100;
+            player.stamina = 100;
+            if (player.hidingSpot) {
+                player.hidingSpot.occupied = false;
+                player.hidingSpot = null;
+            }
+            
+            alien.x = 100;
+            alien.y = 100;
+            alien.state = 'dormant';
+            alien.suspicion = 0;
+            alien.soundQueue = [];
+            alien.searchTargets = [];
+            alien.routeIndex = 0;
+            alien.stateTimer = 0;
+            alien.currentCheckSpot = null;
+            alien.checkingTimer = 0;
+            
+            hidingSpots.forEach(spot => spot.occupied = false);
+            
+            miniGame.active = false;
+            miniGame.type = 'none';
+            miniGame.nextGameTimer = 0;
+            
+            const gameOverDiv = document.querySelector('.game-over');
+            if (gameOverDiv) {
+                gameOverDiv.remove();
+            }
+        }
+
+        // Game loop
+        let lastTime = 0;
+        function gameLoop(currentTime) {
+            const deltaTime = (currentTime - lastTime) / 1000;
+            lastTime = currentTime;
+            
+            if (deltaTime < 0.1) {
+                updateGame(deltaTime);
+                drawGame();
+            }
+            
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Initialize and start game
+        alien.init();
+        requestAnimationFrame(gameLoop);
+    </script>
+</body>
+</html>
